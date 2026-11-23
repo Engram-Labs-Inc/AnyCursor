@@ -744,6 +744,38 @@ function upstreamFor(url) {
   return DEFAULT_UPSTREAM;
 }
 
+/**
+ * Resolve a proxy request target without allowing the request path to select a
+ * different origin. Node accepts absolute-form request targets, so
+ * `new URL(req.url, upstream)` is not safe by itself: a caller could send
+ * `http://169.254.169.254/...` and bypass the intended Cursor upstream.
+ */
+function targetFor(requestUrl, upstream) {
+  const base = new URL(upstream);
+  let parsed;
+  try {
+    parsed = new URL(String(requestUrl || '/'), base);
+  } catch (_) {
+    const bad = new Error('bad url');
+    bad.statusCode = 400;
+    throw bad;
+  }
+  if (parsed.origin !== base.origin) {
+    const blocked = new Error('cross-origin target rejected');
+    blocked.statusCode = 403;
+    throw blocked;
+  }
+  return {
+    origin: base.origin,
+    host: base.host,
+    protocol: base.protocol,
+    hostname: base.hostname,
+    port: base.port,
+    pathname: parsed.pathname,
+    path: parsed.pathname + parsed.search,
+  };
+}
+
 function log(obj) {
   traffic.write(JSON.stringify(obj) + '\n');
 }
@@ -786,6 +818,11 @@ function sendJson(res, status, payload, headOnly = false) {
   if (!headOnly) res.end(body); else res.end();
 }
 
+function clientError(res, status, message, error) {
+  if (error) fatal(message, error);
+  sendJson(res, status, { ok: false, error: message });
+}
+
 function redactModel(model) {
   return {
     id: model.id,
@@ -817,18 +854,31 @@ async function lookupModelMetadata(providerName, modelId) {
   }
   const config = currentConfig() || {};
   const provider = (config.providers || {})[providerName] || {};
-  const base = String(provider.baseUrl || '').toLowerCase();
+  let host = '';
+  let port = '';
+  try {
+    const endpoint = new URL(String(provider.baseUrl || ''));
+    host = endpoint.hostname.toLowerCase();
+    port = endpoint.port;
+  } catch (_) { /* non-URL endpoints have no host hints */ }
+
+  const hostMatches = (domain) => host === domain || host.endsWith(`.${domain}`);
 
   // Provider ids used by models.dev, inferred from the endpoint when the
-  // configured id is missing or stale.
+  // configured id is missing or stale. Compare parsed hostnames, never
+  // substrings of the raw URL: `evil-ollama.com` is not `ollama.com`.
   const hostIds = [];
-  if (base.includes('ollama.com')) hostIds.push('ollama-cloud');
-  if (/:11434|localhost|127\.0\.0\.1/.test(base)) hostIds.push('ollama');
-  for (const [needle, id] of [
-    ['openrouter', 'openrouter'], ['opencode.ai', 'opencode'], ['api.openai.com', 'openai'], ['anthropic', 'anthropic'],
-    ['googleapis', 'google'], ['deepseek', 'deepseek'], ['mistral', 'mistral'], ['groq', 'groq'],
+  if (hostMatches('ollama.com')) hostIds.push('ollama-cloud');
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1'
+      || host === '[::1]' || port === '11434') {
+    hostIds.push('ollama');
+  }
+  for (const [domain, id] of [
+    ['openrouter.ai', 'openrouter'], ['opencode.ai', 'opencode'], ['openai.com', 'openai'],
+    ['anthropic.com', 'anthropic'], ['googleapis.com', 'google'], ['deepseek.com', 'deepseek'],
+    ['mistral.ai', 'mistral'], ['groq.com', 'groq'],
   ]) {
-    if (base.includes(needle)) hostIds.push(id);
+    if (hostMatches(domain)) hostIds.push(id);
   }
 
   const candidates = [...new Set([provider.modelsDevProvider, provider.credential, ...hostIds, providerName].filter(Boolean).map(String))];
@@ -885,7 +935,7 @@ function statusPayload(principal = null) {
     uptimeMs: Date.now() - STARTED_AT,
     configPath: CONFIG_PATH,
     configLoaded: !!config,
-    configError: configService.error,
+    configError: config ? '' : 'configuration could not be loaded',
     warnings: configService.warnings,
     auth: principal ? access.publicPrincipal(principal) : null,
     encryption: {
@@ -1183,9 +1233,9 @@ function handleLocal(req, res) {
           sendJson(res, 201, { ok: true, grant: access.sanitizeGrant(grant), token });
         } catch (error) {
           auditAccess(req, principal, 'manage', 'grants', false, 400);
-          sendJson(res, 400, { ok: false, error: String(error && error.message ? error.message : error) });
+          clientError(res, 400, 'invalid grant request', error);
         }
-      }, (error) => sendJson(res, 400, { ok: false, error: String(error.message || error) }));
+      }, (error) => clientError(res, 400, 'invalid request body', error));
       return true;
     }
 
@@ -1239,10 +1289,10 @@ function handleLocal(req, res) {
           }));
         } catch (error) {
           auditAccess(req, principal, 'write', 'config', false, 400);
-          sendJson(res, 400, { ok: false, error: String(error && error.message ? error.message : error) });
+          clientError(res, 400, 'configuration could not be saved', error);
         }
       }, (error) => {
-        sendJson(res, 400, { ok: false, error: String(error && error.message ? error.message : error) });
+        clientError(res, 400, 'invalid request body', error);
       });
       return true;
     }
@@ -1259,9 +1309,9 @@ function handleLocal(req, res) {
         const found = await lookupModelMetadata(String(body.provider || ''), String(body.model || ''));
         sendJson(res, 200, found ? { ok: true, found: true, providerId: found.providerId, source: found.source, meta: found.meta } : { ok: true, found: false });
       } catch (error) {
-        sendJson(res, 502, { ok: false, error: String((error && error.message) || error) });
+        clientError(res, 502, 'model lookup failed', error);
       }
-    }).catch((error) => sendJson(res, 400, { ok: false, error: String((error && error.message) || error) }));
+    }).catch((error) => clientError(res, 400, 'invalid request body', error));
     return true;
   }
 
@@ -1270,7 +1320,8 @@ function handleLocal(req, res) {
     if (!allowWrite()) return true;
     const loaded = configService.load();
     if (!loaded) {
-      sendJson(res, 400, { ok: false, error: configService.error });
+      fatal('config-reload', new Error(configService.error || 'config load failed'));
+      sendJson(res, 400, { ok: false, error: 'configuration could not be loaded' });
       return true;
     }
     applyConfig();
@@ -1298,7 +1349,7 @@ function handleLocal(req, res) {
           .sort((a, b) => a.name.localeCompare(b.name));
         sendJson(res, 200, { ok: true, providers }, req.method === 'HEAD');
       } catch (error) {
-        sendJson(res, 502, { ok: false, error: String((error && error.message) || error) });
+        clientError(res, 502, 'provider catalogue unavailable', error);
       }
     })();
     return true;
@@ -1389,9 +1440,9 @@ const h1 = http.createServer((req, res) => {
     const upstream = upstreamFor(req.url);
     let target;
     try {
-      target = new URL(req.url, upstream);
+      target = targetFor(req.url, upstream);
     } catch (e) {
-      res.writeHead(400).end('bad url');
+      res.writeHead(e.statusCode || 400).end('bad url');
       return;
     }
 
@@ -1411,7 +1462,14 @@ const h1 = http.createServer((req, res) => {
 
     const pathOnly = target.pathname;
     const shouldTransform = pathOnly === '/aiserver.v1.AiService/AvailableModels';
-    const up = https.request(target, { method: req.method, headers }, (upRes) => {
+    const up = https.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || undefined,
+      path: target.path,
+      method: req.method,
+      headers,
+    }, (upRes) => {
       if (!shouldTransform) {
         res.writeHead(upRes.statusCode || 502, upRes.headers);
         let rsize = 0;
@@ -1483,7 +1541,7 @@ const h1 = http.createServer((req, res) => {
     up.on('error', (e) => {
       log({ id, dir: 'error', protocol: 'h1', error: String(e) });
       if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' });
-      res.end('cursor proxy upstream error: ' + e.message);
+      res.end('cursor proxy upstream error');
     });
 
     if (body.length) up.write(body);
@@ -1500,9 +1558,9 @@ function forwardH2(stream, hdrs, id, reqPath, prefix = Buffer.alloc(0)) {
   const upstream = upstreamFor(reqPath);
   let target;
   try {
-    target = new URL(reqPath, upstream);
+    target = targetFor(reqPath, upstream);
   } catch (e) {
-    stream.respond({ ':status': 400 });
+    stream.respond({ ':status': e.statusCode || 400 });
     stream.end('bad url');
     return;
   }
@@ -1514,7 +1572,7 @@ function forwardH2(stream, hdrs, id, reqPath, prefix = Buffer.alloc(0)) {
     outHeaders[k] = v;
   }
   outHeaders[':method'] = method;
-  outHeaders[':path'] = target.pathname + target.search;
+  outHeaders[':path'] = target.path;
   outHeaders[':authority'] = target.host;
   outHeaders[':scheme'] = 'https';
 
