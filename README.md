@@ -398,7 +398,7 @@ It edits only a marked block in the hosts file, keeps a backup, and flushes DNS.
 ## Development
 
 ```powershell
-cd C:\Project\AnyCursor
+cd E:\AnyCursor
 ```
 
 Run the gateway manually:

@@ -21,10 +21,10 @@ npm start
 node --check src\gateway\server.js
 ```
 
-Tests live outside the public repo in `C:\Project\AnyCursor-tests`. To run them:
+Tests live outside the public repo in `E:\AnyCursor-tests`. To run them:
 
 ```powershell
-Copy-Item C:\Project\AnyCursor-tests\test .\test -Recurse
+Copy-Item E:\AnyCursor-tests\test .\test -Recurse
 node --test
 Remove-Item test -Recurse -Force
 ```
@@ -80,5 +80,5 @@ draft or an explicit alpha.
 
 ## Related projects
 
-rPanel lives at `C:\Project\rPanel` and has its own session. Do not mix rPanel
+rPanel lives at `E:\rPanel` and has its own session. Do not mix rPanel
 changes into this repository.
