@@ -17,3 +17,6 @@ extension/vendor/
 Thumbs.db
 data/
 *.bak
+
+# Local agent-installed skills (restore with: npx skills experimental_install)
+.agents/

@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "skills": {
+    "fix-finding": {
+      "source": "openai/plugins",
+      "commit": "981b02c0c44058b595f3b4180002c3ae3c806d40",
+      "sourceType": "github",
+      "skillPath": "plugins/codex-security/skills/fix-finding/SKILL.md",
+      "computedHash": "0b0242ec1a1b2bcdad0cde93deb04c2327a18b4a15dac2e2dfd177cb812b3ff2"
+    },
+    "snyk-fix": {
+      "source": "snyk/studio-recipes",
+      "commit": "3752dd05a462184dcce44af3c247f287b41e35de",
+      "sourceType": "github",
+      "skillPath": "command_directives/synchronous_remediation/skills/snyk-fix/SKILL.md",
+      "computedHash": "70701d6131484ca476ea562ffe58b47c8b8ea44876d2b83060025ad9800b1a40"
+    }
+  }
+}

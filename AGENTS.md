@@ -82,3 +82,31 @@ draft or an explicit alpha.
 
 rPanel lives at `E:\rPanel` and has its own session. Do not mix rPanel
 changes into this repository.
+
+## Mandatory post-work security review
+
+After any code change, feature implementation, bug fix, or change to scripts,
+configuration, packaging or CI that can affect runtime behavior, run the
+`fix-finding` skill before concluding the response or opening a pull request.
+
+1. **Scan** — run `fix-finding` on every modified file and the current git diff.
+   Look for exposed secrets, injection, SSRF, path traversal, unsafe
+   deserialization, broken authorization, secret disclosure and unsafe defaults.
+2. **Verify** — confirm each finding is a true positive in the real data flow.
+   Do not patch false positives.
+3. **Patch** — apply the smallest correct fix directly to the affected files.
+4. **Re-verify** — run the relevant tests, linters and syntax checks. A security
+   patch must not introduce regressions.
+5. **Report** — end the response with a short security summary:
+   `Security review: N findings patched` with one line each, or
+   `Security review: 0 vulnerabilities found`.
+
+Rules:
+
+- Do not claim a scan that did not run. If `fix-finding` cannot be loaded,
+  perform the same review manually and say so.
+- Docs-only changes still get a secret scan, but do not need a full code audit.
+- Never print, commit or paste a discovered secret. Report only its location and
+  type, and rotate/revoke it through the proper channel.
+- Run this before commit/push when possible. If a change is already pushed, fix
+  and report it immediately.
