@@ -609,8 +609,8 @@ async function localTool(name, a) {
       const res = await fetch(a.url, { signal: ac.signal, headers: { 'user-agent': 'cursor-local-proxy/1.0' } });
       const text = await res.text();
       const cleaned = text
-        .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, ' ')
-        .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, ' ')
+        .replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, ' ')
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi, ' ')
         .replace(/<[^>]+>/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
