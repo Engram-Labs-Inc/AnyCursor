@@ -40,9 +40,38 @@ foreach ($entry in $startupEntries) {
 }
 
 $binDir = Join-Path $env:LOCALAPPDATA 'AnyCursor\bin'
+$shimExists = Test-Path (Join-Path $binDir 'cursor.cmd')
 if (Test-Path $binDir) {
   Remove-Item $binDir -Recurse -Force -ErrorAction SilentlyContinue
   Write-Host "Removed the shortcut guard scripts." -ForegroundColor Green
+}
+
+# repair-cursor-update.ps1 can move the Cursor CLI out of its install directory
+# so PATH handles cannot block Cursor updates. Put Cursor's own entry back
+# before the shim disappears, otherwise "cursor" stops resolving.
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($userPath -and $shimExists) {
+  $parts = @($userPath -split ';' | Where-Object { $_ -and $_.Trim() })
+  $shimIndex = -1
+  for ($i = 0; $i -lt $parts.Count; $i++) {
+    if ($parts[$i].Trim().TrimEnd('\') -ieq $binDir.TrimEnd('\')) { $shimIndex = $i; break }
+  }
+  if ($shimIndex -ge 0) {
+    $cursorBin = Join-Path $env:LOCALAPPDATA 'Programs\cursor\resources\app\bin'
+    if (Test-Path $cursorBin) {
+      $parts[$shimIndex] = $cursorBin
+    } else {
+      $parts = @($parts | Where-Object { $_.Trim().TrimEnd('\') -ine $binDir.TrimEnd('\') })
+    }
+    try {
+      $registry = Get-Item 'HKCU:\Environment'
+      $kind = $registry.GetValueKind('Path')
+      Set-ItemProperty -Path 'HKCU:\Environment' -Name 'Path' -Value ($parts -join ';') -Type $kind
+      Write-Host "Restored the Cursor CLI PATH entry." -ForegroundColor Green
+    } catch {
+      Write-Host "Could not restore the Cursor CLI PATH entry; check your user PATH." -ForegroundColor Yellow
+    }
+  }
 }
 
 $hostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'

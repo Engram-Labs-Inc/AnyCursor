@@ -461,29 +461,42 @@ On a paid plan the same message can also appear when a custom provider key or an
 
 ### Cursor update fails with "Access is denied: resources"
 
-Cursor's updater swaps the `resources` directory while Cursor is supposed to be
-closed. Any leftover `Cursor.exe` helper (`gitWorker`, `jsonServer`, an
-extension host) or a stuck `CodeSetup`/`inno_updater` process keeps a handle on
-`resources`, and the update fails after eleven move attempts. AnyCursor does not
-patch `resources`; the shortcut guard now pauses while an updater or installer is
-running so it cannot race the swap.
+Cursor's updater renames the whole `resources` directory while Cursor is
+supposed to be closed. Two things can hold a handle on it:
 
-1. Save your work and close every Cursor window.
-2. Wait until Task Manager has no `Cursor.exe` entries, including helpers.
-3. Retry the update.
-4. If a `CodeSetup`/`inno_updater` process is stuck, end it and run the official
-   Cursor installer again. A clean installer run replaces `resources` reliably.
-5. Restart Cursor. The shortcut guard restores `--test-backend-url` within a
-   minute; if the window is already open without it, restart Cursor.
+- a leftover `Cursor.exe` helper (`gitWorker`, `jsonServer`, an extension host)
+  or a stuck `CodeSetup`/`inno_updater` process;
+- a PATH entry that points inside the install directory. Cursor's installer adds
+  `<install>\resources\app\bin` so the `cursor` CLI works, and other Electron
+  tools (VS Code forks, editors, terminals) keep directory handles on PATH
+  folders for as long as they run. That handle survives Cursor closing and
+  blocks every update with `Access is denied`.
 
-Helper script:
+AnyCursor does not patch `resources`; the shortcut guard pauses while an updater
+or installer runs so it cannot race the swap. The repair script handles both
+causes:
+
+1. It closes Cursor and ends leftover Cursor/installer processes.
+2. It detects PATH entries inside the install directory, installs the `cursor`
+   CLI shim at `%LOCALAPPDATA%\AnyCursor\bin\cursor.cmd` and rewrites the user
+   PATH to point at the shim. The `cursor` command keeps working and the install
+   directory leaves PATH.
+3. If Cursor already downloaded an update into `<install>\_` and failed to
+   promote it, the script checks the staged signature and version, copies it
+   over the install without renaming `resources`, and clears the stale
+   update-supervisor state.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\repair-cursor-update.ps1
 ```
 
-It closes Cursor, ends leftover Cursor/installer processes and relaunches
-Cursor. It does not delete user data or Cursor settings.
+`-ReportOnly` inspects without changing anything; `-FixCliPath` and `-Promote`
+act without prompts; `-NoLaunch` skips the relaunch. Restart other editors and
+terminals after the PATH change so they release the old directory handle.
+
+If the update still fails, run the official Cursor installer again; a clean
+installer run replaces `resources` reliably. The script never patches Cursor and
+never deletes user data or settings.
 
 ### Gateway is down
 
