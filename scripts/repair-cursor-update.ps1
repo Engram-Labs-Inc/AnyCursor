@@ -33,6 +33,10 @@ $backupRoot = Join-Path $root "_bak"
 $shimDir = Join-Path $env:LOCALAPPDATA "AnyCursor\bin"
 $supervisor = Join-Path $env:APPDATA "Cursor\update-supervisor\win32"
 
+$cliHelper = Join-Path $PSScriptRoot "cursor-cli-path.ps1"
+if (-not (Test-Path $cliHelper)) { throw "missing $cliHelper" }
+. $cliHelper
+
 function Get-ProductVersion([string]$path) {
   if (-not (Test-Path $path)) { return "" }
   $value = (Get-Item $path -ErrorAction SilentlyContinue).VersionInfo.ProductVersion
@@ -56,31 +60,6 @@ function Get-AppVersion([string]$installRoot) {
   } catch {
     return ""
   }
-}
-
-function Get-InstallPathEntries {
-  $entries = @()
-  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-  if ($userPath) {
-    $entries += [pscustomobject]@{ Scope = "user"; Value = $userPath }
-  }
-  $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-  if ($machinePath) {
-    $entries += [pscustomobject]@{ Scope = "machine"; Value = $machinePath }
-  }
-  $found = @()
-  foreach ($entry in $entries) {
-    foreach ($part in ($entry.Value -split ";")) {
-      $trimmed = $part.Trim().TrimEnd("\")
-      if (-not $trimmed) { continue }
-      $normalized = $trimmed.ToLowerInvariant()
-      $rootNormalized = $root.TrimEnd("\").ToLowerInvariant()
-      if ($normalized -eq $rootNormalized -or $normalized.StartsWith($rootNormalized + "\")) {
-        $found += [pscustomobject]@{ Scope = $entry.Scope; Path = $trimmed }
-      }
-    }
-  }
-  return $found
 }
 
 function Confirm-Action([string]$question) {
@@ -130,11 +109,35 @@ function Stop-StuckInstallers {
   Start-Sleep -Seconds 3
 }
 
-function Test-StagedUpdate {
+function Test-StagedUpdate([string]$installedExeVersion) {
   $stagedExe = Join-Path $stagedRoot "Cursor.exe"
-  if (-not (Test-Path $stagedExe)) {
-    throw "The staged update has no Cursor.exe: $stagedRoot"
+  $stagedAppVersion = Get-AppVersion $stagedRoot
+  if (-not $stagedAppVersion) {
+    throw "The staged update has no resources\app\package.json."
   }
+  foreach ($marker in @("resources\app\out\main.js", "resources\app\product.json", "resources\app\bin\cursor.cmd")) {
+    if (-not (Test-Path (Join-Path $stagedRoot $marker))) {
+      throw "The staged update is incomplete (missing $marker)."
+    }
+  }
+
+  if (-not (Test-Path $stagedExe)) {
+    # The updater promotes Cursor.exe before it swaps "resources". A staged
+    # folder without Cursor.exe means the commit stopped halfway: finish it with
+    # the staged resources, but only if they belong to the installed executable.
+    if (-not (Test-Path $exe)) {
+      throw "Neither the install nor the staged update has a Cursor.exe. Run the official Cursor installer."
+    }
+    $installedSignature = Get-AuthenticodeSignature $exe
+    if ($installedSignature.Status -ne "Valid") {
+      throw "The installed Cursor.exe signature is not valid ($($installedSignature.Status)). Run the official Cursor installer."
+    }
+    if ($installedExeVersion -ne $stagedAppVersion) {
+      throw "The staged resources are $stagedAppVersion but the installed Cursor.exe is $installedExeVersion. Run the official Cursor installer."
+    }
+    return $stagedAppVersion
+  }
+
   $signature = Get-AuthenticodeSignature $stagedExe
   if ($signature.Status -ne "Valid") {
     throw "The staged Cursor.exe signature is not valid ($($signature.Status)). Run the official Cursor installer instead."
@@ -154,14 +157,8 @@ function Test-StagedUpdate {
   if (-not $stagedVersion) {
     throw "The staged Cursor.exe has no product version."
   }
-  $stagedAppVersion = Get-AppVersion $stagedRoot
-  if (-not $stagedAppVersion -or $stagedAppVersion -ne $stagedVersion) {
+  if ($stagedAppVersion -ne $stagedVersion) {
     throw "The staged app version ($stagedAppVersion) does not match the staged Cursor.exe ($stagedVersion)."
-  }
-  foreach ($marker in @("resources\app\out\main.js", "resources\app\product.json", "resources\app\bin\cursor.cmd")) {
-    if (-not (Test-Path (Join-Path $stagedRoot $marker))) {
-      throw "The staged update is incomplete (missing $marker)."
-    }
   }
   return $stagedVersion
 }
@@ -204,70 +201,43 @@ function Clear-FailedUpdateState {
   }
 }
 
+function Remove-Staging {
+  Remove-Item $stagedRoot -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item (Join-Path $root "cursor-update.journal.json") -Force -ErrorAction SilentlyContinue
+}
+
 function Set-CliShimPath {
-  New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
-  $shim = Join-Path $shimDir "cursor.cmd"
-  $content = @"
-@echo off
-rem AnyCursor shim. Cursor's own installer puts its CLI inside the install
-rem directory; other editors keep directory handles on PATH folders and block
-rem Cursor updates. This shim keeps "cursor" on PATH without touching it.
-call "%LOCALAPPDATA%\Programs\cursor\resources\app\bin\cursor.cmd" %*
-exit /b %ERRORLEVEL%
-"@
-  Set-Content -Path $shim -Value $content -Encoding ASCII
-
-  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-  if (-not $userPath) { throw "The user PATH is empty; refusing to rewrite it." }
-  $kept = @()
-  $seen = @{}
-  foreach ($part in ($userPath -split ";")) {
-    $trimmed = $part.Trim()
-    if (-not $trimmed) { continue }
-    $normalized = $trimmed.TrimEnd("\").ToLowerInvariant()
-    $rootNormalized = $root.TrimEnd("\").ToLowerInvariant()
-    $isInstallEntry = $normalized -eq $rootNormalized -or $normalized.StartsWith($rootNormalized + "\")
-    $value = if ($isInstallEntry) { $shimDir } else { $trimmed }
-    $key = $value.TrimEnd("\").ToLowerInvariant()
-    if ($seen.ContainsKey($key)) { continue }
-    $seen[$key] = $true
-    $kept += $value
+  $result = Set-CursorCliShim $root $shimDir
+  Write-Host "cursor CLI shim: $($result.Shim)" -ForegroundColor Green
+  if ($result.Changed) {
+    Write-Host "PATH now points at $shimDir instead of the install directory." -ForegroundColor Green
+    Write-Host "Restart editors and terminals so they drop the old directory handle." -ForegroundColor Yellow
+  } else {
+    Write-Host "PATH already points at $shimDir." -ForegroundColor Green
   }
-  $joined = $kept -join ";"
-
-  $registry = Get-Item "HKCU:\Environment"
-  $kind = $registry.GetValueKind("Path")
-  Set-ItemProperty -Path "HKCU:\Environment" -Name "Path" -Value $joined -Type $kind
-  $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-
-  try {
-    Add-Type -Namespace AnyCursor -Name NativeMethods -MemberDefinition @"
-[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
-public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out System.UIntPtr lpdwResult);
-"@ -ErrorAction Stop
-    $result = [UIntPtr]::Zero
-    [AnyCursor.NativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
-  } catch {
-    Write-Host "Restart Explorer or sign out for the PATH change to reach new processes." -ForegroundColor Yellow
-  }
-
-  Write-Host "cursor CLI shim: $shim" -ForegroundColor Green
-  Write-Host "PATH now points at $shimDir instead of the install directory." -ForegroundColor Green
-  Write-Host "Restart editors and terminals so they drop the old directory handle." -ForegroundColor Yellow
 }
 
 $installed = Get-ProductVersion $exe
+$installedApp = Get-AppVersion $root
 $stagedVersion = ""
 if (Test-Path $stagedRoot) {
-  try { $stagedVersion = Get-ProductVersion (Join-Path $stagedRoot "Cursor.exe") } catch { }
+  $stagedVersion = Get-ProductVersion (Join-Path $stagedRoot "Cursor.exe")
+  if (-not $stagedVersion) { $stagedVersion = Get-AppVersion $stagedRoot }
 }
-$pathEntries = @(Get-InstallPathEntries)
+$mismatch = $installed -and $installedApp -and ($installed -ne $installedApp)
+$pathEntries = @(Get-CursorInstallPathEntries $root)
 
 if ($ReportOnly) {
   Write-Host "Install directory: $root"
   Write-Host "Installed Cursor:  $(if ($installed) { $installed } else { 'missing' })"
+  Write-Host "Installed app:     $(if ($installedApp) { $installedApp } else { 'missing' })"
   Write-Host "Staged update:     $(if (Test-Path $stagedRoot) { if ($stagedVersion) { $stagedVersion } else { 'present, unreadable' } } else { 'none' })"
   Write-Host "Backup:            $(if (Test-Path $backupRoot) { 'present' } else { 'none' })"
+  if ($mismatch) {
+    Write-Host "The install is inconsistent: Cursor.exe $installed with resources\app $installedApp." -ForegroundColor Yellow
+    Write-Host "Cursor will not start until the versions match." -ForegroundColor Yellow
+  }
   if ($pathEntries.Count -gt 0) {
     Write-Host "PATH entries inside the install directory:" -ForegroundColor Yellow
     foreach ($entry in $pathEntries) { Write-Host "  [$($entry.Scope)] $($entry.Path)" -ForegroundColor Yellow }
@@ -292,8 +262,12 @@ Stop-StuckInstallers
 
 Write-Host ""
 Write-Host "Installed Cursor: $(if ($installed) { $installed } else { 'missing' })"
+Write-Host "Installed app:    $(if ($installedApp) { $installedApp } else { 'missing' })"
 Write-Host "Staged update:    $(if (Test-Path $stagedRoot) { if ($stagedVersion) { $stagedVersion } else { 'present' } } else { 'none' })"
 Write-Host "Backup:           $(if (Test-Path $backupRoot) { 'present' } else { 'none' })"
+if ($mismatch) {
+  Write-Host "The install is inconsistent: Cursor.exe $installed with resources\app $installedApp." -ForegroundColor Yellow
+}
 
 if (-not $installed) {
   Write-Host ""
@@ -320,33 +294,49 @@ if ($pathEntries.Count -gt 0) {
 if (Test-Path $stagedRoot) {
   Write-Host ""
   try {
-    $verified = Test-StagedUpdate
+    $verified = Test-StagedUpdate $installed
   } catch {
     Write-Host $_.Exception.Message -ForegroundColor Yellow
     $verified = ""
   }
   if ($verified) {
     $comparison = Compare-VersionText $verified $installed
-    if ($null -eq $comparison) {
-      Write-Host "Could not compare staged $verified with installed $installed; leaving the staging folder alone." -ForegroundColor Yellow
-    } elseif ($comparison -gt 0) {
+    $needsPromotion = $mismatch -or ($null -ne $comparison -and $comparison -gt 0)
+    if ($needsPromotion) {
+      if ($mismatch) {
+        Write-Host "A staged Cursor $verified commit was interrupted. Finishing it repairs the install." -ForegroundColor Yellow
+      }
       if ($Promote -or (Confirm-Action "Promote staged Cursor $verified over $installed in place?")) {
         Invoke-StagedPromotion $verified
-        Remove-Item $stagedRoot -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Staging
         Clear-FailedUpdateState
       }
+    } elseif ($null -eq $comparison) {
+      Write-Host "Could not compare staged $verified with installed $installed; leaving the staging folder alone." -ForegroundColor Yellow
     } elseif ($comparison -eq 0) {
       Write-Host "Staged files match the installed version; removing the leftovers." -ForegroundColor Green
-      Remove-Item $stagedRoot -Recurse -Force -ErrorAction SilentlyContinue
-      Remove-Item $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Staging
       Clear-FailedUpdateState
     } else {
       Write-Host "Staged Cursor $verified is older than the installed $installed; removing it." -ForegroundColor Green
-      Remove-Item $stagedRoot -Recurse -Force -ErrorAction SilentlyContinue
-      Remove-Item $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Staging
     }
+  } elseif ($mismatch) {
+    Write-Host "The staged update cannot be promoted. Run the official Cursor installer." -ForegroundColor Yellow
   }
+} elseif ($mismatch) {
+  Write-Host ""
+  Write-Host "No staged update is left to finish this commit." -ForegroundColor Yellow
+  Write-Host "Run the official Cursor installer once to repair the application." -ForegroundColor Yellow
+}
+
+$installedAfter = Get-ProductVersion $exe
+$appAfter = Get-AppVersion $root
+if ($installedAfter -and $appAfter -and ($installedAfter -ne $appAfter)) {
+  Write-Host ""
+  Write-Host "Cursor.exe $installedAfter and resources\app $appAfter still do not match." -ForegroundColor Yellow
+  Write-Host "Run the official Cursor installer once to repair the application." -ForegroundColor Yellow
+  exit 3
 }
 
 if (-not $NoLaunch) {

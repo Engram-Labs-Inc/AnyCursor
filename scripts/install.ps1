@@ -244,7 +244,7 @@ function Install-Watchdog {
 function Install-GuardScripts {
   $bin = Join-Path $env:LOCALAPPDATA 'AnyCursor\bin'
   New-Item -ItemType Directory -Force -Path $bin | Out-Null
-  foreach ($file in @('shortcut-guard.ps1', 'repair-shortcuts.ps1')) {
+  foreach ($file in @('shortcut-guard.ps1', 'repair-shortcuts.ps1', 'cursor-cli-path.ps1')) {
     $source = Join-Path $PSScriptRoot $file
     if (-not (Test-Path $source)) { throw "missing $source" }
     Copy-Item $source (Join-Path $bin $file) -Force

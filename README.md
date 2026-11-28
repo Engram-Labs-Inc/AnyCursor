@@ -484,7 +484,14 @@ causes:
 3. If Cursor already downloaded an update into `<install>\_` and failed to
    promote it, the script checks the staged signature and version, copies it
    over the install without renaming `resources`, and clears the stale
-   update-supervisor state.
+   update-supervisor state. A staged folder with new `resources` but no
+   `Cursor.exe` is a commit that stopped halfway; finishing it fixes an install
+   whose `Cursor.exe` and `resources\app` versions differ (the usual reason
+   Cursor closes instantly or never opens a window).
+
+Cursor's installer re-adds its own PATH entry on every update, so the shortcut
+guard repeats the PATH fix on its normal tick. `-ReportOnly` shows the mismatch
+between `Cursor.exe` and `resources\app` without changing anything.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\repair-cursor-update.ps1

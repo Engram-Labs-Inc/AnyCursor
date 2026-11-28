@@ -119,6 +119,35 @@ if ($Config -and (Test-Path $Config)) {
 if (-not $patchShortcuts) { exit 0 }
 if ([string]::IsNullOrWhiteSpace($backendUrl)) { $backendUrl = "http://127.0.0.1:43110" }
 
+# Cursor's installer re-adds "<install>\resources\app\bin" to PATH on every
+# update. Other Electron tools keep directory handles on PATH folders, which
+# blocks the next update's "resources" swap. Keep the CLI shim outside the
+# install directory so the handle can never land there again.
+$cursorInstall = Join-Path $env:LOCALAPPDATA "Programs\cursor"
+$cliHelper = Join-Path $PSScriptRoot "cursor-cli-path.ps1"
+if ((Test-Path $cliHelper) -and (Test-Path $cursorInstall)) {
+  try {
+    . $cliHelper
+    $installEntries = @(Get-CursorInstallPathEntries $cursorInstall)
+    if ($installEntries.Count -gt 0) {
+      $userEntries = @($installEntries | Where-Object { $_.Scope -eq "user" })
+      if ($DryRun) {
+        Write-Quiet "PATH points inside the Cursor install directory: $($installEntries[0].Path)" "Yellow"
+      } elseif ($userEntries.Count -gt 0) {
+        $shimResult = Set-CursorCliShim $cursorInstall (Join-Path $env:LOCALAPPDATA "AnyCursor\bin")
+        if ($shimResult.Changed) {
+          Write-GuardLog "moved the cursor CLI PATH entry out of the install directory"
+          Write-Quiet "Moved the cursor CLI PATH entry out of the install directory." "Yellow"
+        }
+      } else {
+        Write-GuardLog "a machine PATH entry points inside the Cursor install directory; remove it as an administrator"
+      }
+    }
+  } catch {
+    Write-GuardLog "could not repair the Cursor CLI PATH entry: $($_.Exception.Message)"
+  }
+}
+
 # Accept both "--test-backend-url URL" and "--test-backend-url=URL", with or
 # without quotes, so a flag written by an older AnyCursor still counts.
 $flagPattern = '--test-backend-url(?:\s+|=)"?' + [regex]::Escape($backendUrl) + '"?'
